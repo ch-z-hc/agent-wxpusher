@@ -1,12 +1,15 @@
 // WxPusher stop notification for Codex (Stop hook) and Pi (agent_settled extension).
-// Deployed by install.mjs in this folder; edit ~/wxpusher/send-wxpusher-stop.mjs instead.
+// Deployed by install.mjs; edit the source copy in the agent-wxpusher repository.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { randomUUID } from "node:crypto";
 
-const CONFIG = path.join(os.homedir(), ".codex", "wxpusher.json");
+// Each deployed copy reads its own config; Pi no longer requires Codex.
+const CONFIG = path.join(path.dirname(fileURLToPath(import.meta.url)), "wxpusher.json");
 const PUSH_URL = "https://wxpusher.zjiecode.com/api/send/message/simple-push";
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_SUMMARY_LENGTH = 60;
@@ -116,7 +119,7 @@ function codexTomlSection(tx, name, suffix) {
 function codexEndpoint() {
   let tx = "";
   try {
-    tx = fs.readFileSync(path.join(os.homedir(), ".codex", "config.toml"), "utf8");
+    tx = fs.readFileSync(path.join(process.env.CODEX_HOME || path.join(os.homedir(), ".codex"), "config.toml"), "utf8");
   } catch {
     return null;
   }
@@ -126,10 +129,11 @@ function codexEndpoint() {
   if (!provider) return null;
   const block = codexTomlSection(tx, provider[1]);
   const base = tomlField(block, "base_url").replace(/"/g, "");
-  let key = "";
+  const envKey = tomlField(block, "env_key").replace(/"/g, "");
+  let key = envKey ? process.env[envKey] || "" : "";
   const auth = codexTomlSection(tx, provider[1], ".auth");
   const args = tomlField(auth, "args");
-  if (args) {
+  if (!key && args) {
     try {
       const values = JSON.parse(args);
       if (Array.isArray(values) && values.length) key = String(values[values.length - 1]);
@@ -215,7 +219,7 @@ function summarizeViaProxy(proxy, target, context, config = {}) {
     let tmp = "";
     try {
       tmp = path.join(os.tmpdir(), `wxpusher-sum-${process.pid}-${Date.now()}.json`);
-      fs.writeFileSync(tmp, JSON.stringify({ target, context }), "utf8");
+      fs.writeFileSync(tmp, JSON.stringify({ target, context }), { mode: 0o600 });
       const child = spawn(nodeBin, [process.argv[1], "--summarize-only", tmp], {
         env: { ...process.env, WXPUSHER_SUMMARIZE_ONLY: "1", NODE_USE_ENV_PROXY: "1",
                HTTP_PROXY: proxy, HTTPS_PROXY: proxy },
@@ -249,7 +253,7 @@ async function summaryCall(target, context) {
         "Content-Type": "application/json",
         // aizex rejects byte-identical requests with 409 duplicate_request, which
         // two similar turns would hit; the gateway asks for this header explicitly.
-        "Idempotency-Key": crypto.randomUUID(),
+        "Idempotency-Key": randomUUID(),
       },
       body: JSON.stringify({
         model: target.model,
@@ -299,6 +303,11 @@ async function push(input, agent) {
 
 async function main() {
   const agent = agentOf();
+  if (process.argv.includes("--test")) {
+    await push({ title: "WxPusher 测试通知" }, agent);
+    console.log(`[wxpusher] ${agent} 测试通知已发送`);
+    return;
+  }
   const summarizeOnly = argOf("--summarize-only");
   if (summarizeOnly) {
     // Proxy helper mode: one summary call, printed behind the marker, never pushes.
@@ -330,7 +339,7 @@ async function main() {
   // The summary is one model call and the push is one HTTP call: keep the
   // agent turn unblocked by handing them to a detached copy of this script.
   const tmp = path.join(os.tmpdir(), `wxpusher-${process.pid}-${Date.now()}.json`);
-  fs.writeFileSync(tmp, JSON.stringify(payload));
+  fs.writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 });
   const child = spawn(process.execPath, [process.argv[1], "--worker", tmp, "--agent", agent], {
     detached: true,
     stdio: "ignore",
@@ -342,10 +351,17 @@ async function main() {
   child.unref();
 }
 
+const hookMode = !process.argv.some((arg) => ["--test", "--worker", "--summarize-only"].includes(arg));
 try {
   if (process.env.CODEX_STOP_WXPUSHER_DRY_RUN !== "1") await main();
 } catch (error) {
   // Notifications must never block a completed agent turn.
-  console.error(`[codex-stop-wxpusher] ${error instanceof Error ? error.message : error}`);
-  process.exitCode = 1;
+  if (!hookMode || process.env.WXPUSHER_SYNC === "1") {
+    // Do not print parser errors or upstream responses that may echo secrets.
+    console.error("[wxpusher] 推送失败，请检查配置、SPT 和网络连接");
+    process.exitCode = 1;
+  }
+} finally {
+  // Stop is a notification, never a request to continue or block the agent.
+  if (hookMode) process.stdout.write("{}\n");
 }

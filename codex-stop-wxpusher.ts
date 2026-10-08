@@ -1,14 +1,14 @@
 // WxPusher "task done" push for Pi. Deployed by install.mjs in this folder into
-// ~/.pi/agent/extensions/; edit ~/wxpusher/codex-stop-wxpusher.ts instead.
+// ~/.pi/agent/extensions/; edit the source copy in the agent-wxpusher repository.
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-// Shared with the Codex Stop hook; homedir-relative so one file covers
-// Windows and Linux.
-const STOP_HOOK = path.join(os.homedir(), ".codex", "send-wxpusher-stop.mjs");
+// Each agent has its own deployed copy of the same notifier.
+const STOP_HOOK = path.join(process.env.PI_CODING_AGENT_DIR || path.join(os.homedir(), ".pi", "agent"), "send-wxpusher-stop.mjs");
 
 function textOf(message: any): string {
   if (typeof message?.content === "string") return message.content.trim();
@@ -23,6 +23,11 @@ function textOf(message: any): string {
 export default function (pi: ExtensionAPI) {
   let lastUser = "";
   let lastAssistant = "";
+
+  pi.on("agent_start", () => {
+    lastUser = "";
+    lastAssistant = "";
+  });
 
   pi.on("message_end", (event) => {
     const message = event.message as any;
@@ -56,7 +61,12 @@ export default function (pi: ExtensionAPI) {
       if (baseUrl) payload.base_url = baseUrl;
       if (apiKey) payload.api_key = apiKey;
     }
-    const child = spawn(process.execPath, [STOP_HOOK, "--agent", "Pi"], {
+    let nodeBin = process.execPath;
+    try {
+      const config = JSON.parse(fs.readFileSync(path.join(path.dirname(STOP_HOOK), "wxpusher.json"), "utf8"));
+      if (typeof config.node === "string" && config.node.trim()) nodeBin = config.node;
+    } catch { /* notifier failures must not affect the agent */ }
+    const child = spawn(nodeBin, [STOP_HOOK, "--agent", "Pi"], {
       detached: true,
       stdio: ["pipe", "ignore", "ignore"],
       windowsHide: true,
