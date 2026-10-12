@@ -70,6 +70,18 @@ function fallbackRecap(input, agent) {
   return firstLine(explicit ?? input?.last_assistant_message) || `${agent} 任务`;
 }
 
+function shouldNotify(input, agent) {
+  const answer = typeof input?.last_assistant_message === "string" ? input.last_assistant_message.trim() : "";
+  if (agent.toLowerCase() === "codex" && answer) {
+    try {
+      const result = JSON.parse(answer);
+      // Codex background suggestions are not completed user tasks, even when populated.
+      if (result && Object.keys(result).length === 1 && Array.isArray(result.suggestions)) return false;
+    } catch { /* ordinary assistant text, not a suggestion result */ }
+  }
+  return [input?.title, input?.task_title, input?.taskTitle, answer].some((text) => firstLine(text));
+}
+
 // Codex gives us transcript_path; the user's own request is the part the final
 // answer often leaves out, so pull the last user message out of the rollout.
 function lastUserMessage(transcriptPath) {
@@ -286,6 +298,7 @@ function messageOf(recap, host, agent) {
 }
 
 async function push(input, agent) {
+  if (!shouldNotify(input, agent)) return;
   const config = JSON.parse(fs.readFileSync(CONFIG, "utf8"));
   if (!config.spt) throw new Error("未配置 WxPusher SPT");
   const host = hostOf(config);
@@ -331,6 +344,7 @@ async function main() {
 
   const inputText = await readStdin();
   const payload = inputText.trim() ? JSON.parse(inputText) : {};
+  if (!shouldNotify(payload, agent)) return;
   if (process.env.WXPUSHER_SYNC === "1") {
     await push(payload, agent);
     return;

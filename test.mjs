@@ -258,6 +258,58 @@ test("sender falls back without model credentials, and supports Codex env_key su
   assert.match(f.requests()[2].body.content, /模拟任务摘要/);
 });
 
+test("Codex suggestion results and empty completions never request summaries or push", () => {
+  const f = fixture("ignored completions");
+  succeeds(f.run(["--agent", "codex", "--non-interactive"], credentials));
+  f.write(path.join(f.codex, "config.toml"), 'model = "fixture-model"\nmodel_provider = "fixture"\n[model_providers.fixture]\nbase_url = "https://summary.invalid/v1"\nenv_key = "WX_TEST_PROVIDER_KEY"\n');
+  const sender = path.join(f.codex, "send-wxpusher-stop.mjs");
+  for (const payload of [
+    {}, null, { last_assistant_message: null }, { last_assistant_message: " \n " },
+    { last_assistant_message: "<think>只有思考内容</think>" },
+    { last_user_message: "尚未完成的请求", last_assistant_message: "" },
+    { last_assistant_message: '{"suggestions":[]}' },
+    { last_user_message: "后台建议请求", last_assistant_message: ' { "suggestions": [] } ' },
+    { last_assistant_message: '{"suggestions":[{"title":"后台建议"}]}' },
+  ]) {
+    const result = f.run([], { WXPUSHER_SYNC: "1", WX_TEST_PROVIDER_KEY: "fixture-key" }, JSON.stringify(payload), sender);
+    succeeds(result);
+    assert.deepEqual(JSON.parse(result.stdout), {});
+    assert.equal(f.requests().length, 0, JSON.stringify(payload));
+  }
+  succeeds(f.run([], {}, '{"last_assistant_message":"{\\"suggestions\\":[]}"}', sender));
+  assert.equal(fs.readdirSync(path.join(f.home, "tmp")).length, 0);
+});
+
+test("worker skips suggestion results and missing payloads", () => {
+  const f = fixture("ignored worker");
+  succeeds(f.run(["--agent", "codex", "--non-interactive"], credentials));
+  const sender = path.join(f.codex, "send-wxpusher-stop.mjs");
+  const job = path.join(f.home, "tmp", "job.json");
+  f.write(job, { last_assistant_message: '{"suggestions":[]}' });
+  succeeds(f.run(["--worker", job], {}, "", sender));
+  assert.equal(fs.existsSync(job), false);
+  succeeds(f.run(["--worker", job], {}, "", sender));
+  assert.equal(f.requests().length, 0);
+});
+
+test("normal text, business JSON, explicit titles and Pi replies still push", () => {
+  const f = fixture("preserved completions");
+  succeeds(f.run(["--agent", "codex", "--non-interactive"], credentials));
+  const sender = path.join(f.codex, "send-wxpusher-stop.mjs");
+  for (const [payload, agent, expected] of [
+    [{ last_assistant_message: "修复已完成" }, "Codex", "修复已完成"],
+    [{ last_assistant_message: '{"status":"ok"}' }, "Codex", '{"status":"ok"}'],
+    [{ last_assistant_message: '{"suggestions":[],"status":"ok"}' }, "Codex", '"status":"ok"'],
+    [{ last_assistant_message: '说明：{"suggestions":[]}' }, "Codex", "说明："],
+    [{ title: "手动通知" }, "Codex", "手动通知"],
+    [{ last_assistant_message: '{"suggestions":[]}' }, "Pi", '{"suggestions":[]}'],
+  ]) {
+    succeeds(f.run(["--agent", agent], { WXPUSHER_SYNC: "1" }, JSON.stringify(payload), sender));
+    assert.ok(f.requests().at(-1).body.content.includes(expected));
+  }
+  assert.equal(f.requests().length, 6);
+});
+
 test("detached worker consumes its payload and sends without blocking the hook", async () => {
   const f = fixture("worker");
   succeeds(f.run(["--agent", "pi", "--non-interactive"], credentials));
